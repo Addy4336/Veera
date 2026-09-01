@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vera — Real-Time Voice AI Support Agent</title>
+  <meta name="description" content="Production-grade real-time conversational voice AI agent built with Pipecat, Daily.co WebRTC, Groq STT/LLM, and Cartesia Sonic TTS.">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="/static/css/style.css">
+
+  <!-- Daily.co JS SDK for WebRTC -->
+  <script src="https://unpkg.com/@daily-co/daily-js@0.65.0/dist/daily-iframe.js"></script>
+</head>
+<body>
+
+  <!-- Top App Navigation & Status Header -->
+  <header class="app-header">
+    <div class="brand-container">
+      <div class="brand-logo-orb">V</div>
+      <div class="brand-info">
+        <h1>Vera Voice AI</h1>
+        <p>Enterprise Customer Support • Low-Latency Voice Engine</p>
+      </div>
+    </div>
+
+    <!-- Active Inference Provider Badges -->
+    <div class="provider-pills">
+      <div id="pillGroqStt" class="provider-pill">
+        <span class="dot"></span>
+        <span class="name">STT: Groq Whisper Turbo</span>
+      </div>
+      <div id="pillGroqLlm" class="provider-pill">
+        <span class="dot"></span>
+        <span class="name">LLM: Groq Llama 3.3 70B</span>
+      </div>
+      <div id="pillCartesiaTts" class="provider-pill">
+        <span class="dot"></span>
+        <span class="name">TTS: Cartesia Sonic</span>
+      </div>
+      <div id="pillWebRtc" class="provider-pill">
+        <span class="dot"></span>
+        <span class="name">WebRTC: Daily.co</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Container -->
+  <main class="main-container">
+
+    <!-- Left Column: Voice Console, Controls & Telemetry HUD -->
+    <section class="console-column">
+
+      <!-- Hero Voice Stage -->
+      <div class="glass-panel voice-card">
+        <div class="visualizer-stage">
+          <canvas id="waveCanvas" class="wave-canvas"></canvas>
+          <div id="avatarContainer" class="agent-avatar idle">
+            <span class="avatar-icon">🎧</span>
+            <span id="avatarStateLabel" class="agent-state-label">Ready</span>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls-row">
+          <button id="btnStartCall" class="btn-primary-call">
+            <span>🎙️</span> Start Voice Call
+          </button>
+          <button id="btnInterrupt" class="btn-secondary" disabled title="Interrupt Vera while speaking to test barge-in">
+            <span>⚡</span> Interrupt (Barge-in)
+          </button>
+        </div>
+      </div>
+
+      <!-- Real-Time Latency HUD -->
+      <div class="glass-panel telemetry-section">
+        <div class="section-title">
+          <span>⚡ Real-Time Latency Breakdown</span>
+          <span style="font-size: 0.75rem; color: var(--text-muted);">SLA: &lt;600ms</span>
+        </div>
+
+        <div class="metrics-grid">
+          <!-- STT Latency -->
+          <div class="metric-card sla-good">
+            <div class="label">STT Delay</div>
+            <div class="value"><span id="valStt">180</span><span class="unit">ms</span></div>
+          </div>
+
+          <!-- LLM TTFT -->
+          <div class="metric-card sla-good">
+            <div class="label">LLM TTFT</div>
+            <div class="value"><span id="valTtft">210</span><span class="unit">ms</span></div>
+          </div>
+
+          <!-- TTS TTFA -->
+          <div class="metric-card sla-good">
+            <div class="label">TTS TTFA</div>
+            <div class="value"><span id="valTtfa">95</span><span class="unit">ms</span></div>
+          </div>
+
+          <!-- Total Turn Latency -->
+          <div class="metric-card sla-good">
+            <div class="label">Total Delay</div>
+            <div class="value"><span id="valTotal">485</span><span class="unit">ms</span></div>
+          </div>
+        </div>
+
+        <!-- Secondary Telemetry Row -->
+        <div style="display: flex; justify-content: space-between; margin-top: 14px; font-size: 0.8rem; color: var(--text-muted);">
+          <div>Barge-in Interruption Count: <strong id="valBargeIns" style="color: var(--accent-rose);">0</strong></div>
+          <div>VAD Engine: <strong style="color: var(--accent-cyan);">Silero + Smart Turn v2</strong></div>
+        </div>
+      </div>
+
+      <!-- Conversational State Machine Progress (Pipecat Flows) -->
+      <div class="glass-panel flow-tracker-card">
+        <div class="section-title">
+          <span>🔄 Conversational State Flow</span>
+        </div>
+
+        <div class="flow-nodes-container">
+          <div class="flow-node-step active" data-node="Greeting">
+            <div class="flow-node-bullet">1</div>
+            <div class="flow-node-name">Greeting</div>
+          </div>
+          <div class="flow-node-step" data-node="IntentCapture">
+            <div class="flow-node-bullet">2</div>
+            <div class="flow-node-name">Intent</div>
+          </div>
+          <div class="flow-node-step" data-node="OrderStatus">
+            <div class="flow-node-bullet">3</div>
+            <div class="flow-node-name">Order Lookup</div>
+          </div>
+          <div class="flow-node-step" data-node="ScheduleCallback">
+            <div class="flow-node-bullet">4</div>
+            <div class="flow-node-name">Callback</div>
+          </div>
+          <div class="flow-node-step" data-node="Resolution">
+            <div class="flow-node-bullet">5</div>
+            <div class="flow-node-name">Resolution</div>
+          </div>
+          <div class="flow-node-step" data-node="Close">
+            <div class="flow-node-bullet">6</div>
+            <div class="flow-node-name">Close</div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Right Column: Live Transcript, Tool Inspection & Quick Test Prompts -->
+    <section class="feed-column">
+
+      <!-- Live Transcript Box -->
+      <div class="glass-panel transcript-card">
+        <div class="transcript-header">
+          <div class="section-title" style="margin-bottom: 0;">
+            <span>💬 Live Audio Transcript Stream</span>
+          </div>
+          <span style="font-size: 0.75rem; color: var(--text-dim);">Opus 16kHz WebRTC</span>
+        </div>
+
+        <!-- Transcript Feed Area -->
+        <div id="transcriptFeed" class="transcript-feed">
+          <div class="chat-msg agent">
+            <div class="sender-tag">Vera</div>
+            <div class="chat-bubble">
+              Hi! Thanks for calling Vera Support. How can I help you today?
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Test Scenarios & Interview Demo Bar -->
+      <div class="glass-panel scenario-bar">
+        <div class="section-title" style="margin-bottom: 4px;">
+          <span>🎯 Quick Test Scenarios (Demo Controls)</span>
+        </div>
+        <div class="scenario-chips">
+          <button class="chip-btn" data-prompt="Where is my order ORD-12345?">
+            📦 Track Order ORD-12345
+          </button>
+          <button class="chip-btn" data-prompt="I need to schedule a callback for tomorrow at 2 PM">
+            📅 Schedule Callback (2 PM)
+          </button>
+          <button class="chip-btn" data-prompt="What is your return policy and refund time?">
+            ❓ Ask Return Policy
+          </button>
+          <button class="chip-btn" data-prompt="That is all for today, thank you!">
+            👋 Close Call
+          </button>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Client Script -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
