@@ -179,6 +179,10 @@ function setAgentState(state, label) {
   avatarContainer.className = `agent-avatar ${state}`;
   avatarStateLabel.innerText = label;
 
+  const icons = { idle: '🎧', listening: '👂', thinking: '🧠', speaking: '🗣️', interrupted: '⚡' };
+  const iconEl = document.getElementById('avatarIcon');
+  if (iconEl && icons[state]) iconEl.innerText = icons[state];
+
   if (state === 'speaking') {
     startSpeakingWave();
   } else if (state === 'listening') {
@@ -192,41 +196,51 @@ function setAgentState(state, label) {
 }
 
 function updateLatencyHUD(metrics) {
-  if (metrics.stt_latency_ms !== null) {
-    metricStt.innerText = Math.round(metrics.stt_latency_ms);
-    applySlaClass(metricStt.parentElement, metrics.stt_latency_ms, 250, 500);
-  }
-  if (metrics.llm_ttft_ms !== null) {
-    metricTtft.innerText = Math.round(metrics.llm_ttft_ms);
-    applySlaClass(metricTtft.parentElement, metrics.llm_ttft_ms, 300, 700);
-  }
-  if (metrics.tts_ttfa_ms !== null) {
-    metricTtfa.innerText = Math.round(metrics.tts_ttfa_ms);
-    applySlaClass(metricTtfa.parentElement, metrics.tts_ttfa_ms, 150, 400);
-  }
-  if (metrics.total_latency_ms !== null) {
-    metricTotal.innerText = Math.round(metrics.total_latency_ms);
-    applySlaClass(metricTotal.parentElement, metrics.total_latency_ms, 600, 1200);
+  setGauge('arcStt', 'gaugeStt', metrics.stt_latency_ms, 250, 500);
+  setGauge('arcTtft', 'gaugeTtft', metrics.llm_ttft_ms, 300, 700);
+  setGauge('arcTtfa', 'gaugeTtfa', metrics.tts_ttfa_ms, 150, 400);
+  setGauge('arcTotal', 'gaugeTotal', metrics.total_latency_ms, 600, 1200);
+}
+
+// Radial gauge driver: sets arc fill, center value, and SLA color state
+const GAUGE_CIRCUMFERENCE = 263.9; // 2*PI*r, r=42
+const GAUGE_MAX_MS = 1500;
+
+function setGauge(arcId, valueId, ms, goodThreshold, warnThreshold) {
+  if (ms === null || ms === undefined) return;
+  const arc = document.getElementById(arcId);
+  const val = document.getElementById(valueId);
+  const gaugeEl = arc ? arc.closest('.gauge') : null;
+  if (!arc || !val) return;
+
+  const clamped = Math.min(ms, GAUGE_MAX_MS);
+  arc.style.strokeDashoffset = GAUGE_CIRCUMFERENCE * (1 - clamped / GAUGE_MAX_MS);
+  val.innerText = Math.round(ms);
+
+  if (gaugeEl) {
+    gaugeEl.classList.remove('sla-good', 'sla-warn', 'sla-alert');
+    if (ms <= goodThreshold) gaugeEl.classList.add('sla-good');
+    else if (ms <= warnThreshold) gaugeEl.classList.add('sla-warn');
+    else gaugeEl.classList.add('sla-alert');
   }
 }
 
 function applySlaClass(element, value, goodThreshold, warnThreshold) {
-  element.classList.remove('sla-good', 'sla-warn', 'sla-alert');
-  if (value <= goodThreshold) {
-    element.classList.add('sla-good');
-  } else if (value <= warnThreshold) {
-    element.classList.add('sla-warn');
-  } else {
-    element.classList.add('sla-alert');
-  }
+  // Legacy hook kept for compatibility; gauges handle SLA coloring now.
 }
 
+const FLOW_ORDER = ['Greeting', 'IntentCapture', 'OrderStatus', 'ScheduleCallback', 'GeneralFAQ', 'Resolution', 'Close'];
+
 function updateActiveNode(nodeName) {
+  const activeIdx = FLOW_ORDER.indexOf(nodeName);
   document.querySelectorAll('.flow-node-step').forEach(el => {
-    el.classList.remove('active');
     const name = el.getAttribute('data-node');
+    const idx = FLOW_ORDER.indexOf(name);
+    el.classList.remove('active', 'done');
     if (name === nodeName) {
       el.classList.add('active');
+    } else if (activeIdx !== -1 && idx !== -1 && idx < activeIdx) {
+      el.classList.add('done');
     }
   });
 }
@@ -315,13 +329,19 @@ async function startVoiceCall() {
     wsAudio.onmessage = handleAudioWsMessage;
     wsAudio.onclose = () => { if (isCallActive) endVoiceCall(); };
     await new Promise((resolve, reject) => {
-      wsAudio.onopen = resolve;
-      wsAudio.onerror = reject;
-      setTimeout(reject, 8000);
+      const timeout = setTimeout(() => reject(new Error('Pipeline WebSocket handshake timed out after 8s')), 8000);
+      wsAudio.onopen = () => { clearTimeout(timeout); resolve(); };
+      wsAudio.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error(`WebSocket connection to ${wsAudio.url} was rejected (check server console)`));
+      };
     });
 
     // Step 3: Mic capture pipeline -> 16kHz mono s16le PCM frames -> wsAudio
     captureContext = new (window.AudioContext || window.webkitAudioContext)();
+    // Edge/Safari start AudioContexts suspended until explicitly resumed
+    if (captureContext.state === 'suspended') await captureContext.resume();
+
     const source = captureContext.createMediaStreamSource(mediaStream);
     audioAnalyser = captureContext.createAnalyser();
     audioAnalyser.fftSize = 64;
@@ -340,6 +360,7 @@ async function startVoiceCall() {
 
     // Step 4: Playback context at the server's 16kHz rate
     playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SERVER_SAMPLE_RATE });
+    if (playbackContext.state === 'suspended') await playbackContext.resume();
 
     isCallActive = true;
     btnStartCall.disabled = false;
@@ -348,6 +369,8 @@ async function startVoiceCall() {
     btnInterrupt.disabled = false;
 
     setAgentState('listening', 'Connected & Listening');
+    startSessionTimer();
+    showToast('Voice call connected — start talking!', 'success');
     startAudioVisualizer();
 
   } catch (err) {
@@ -371,7 +394,6 @@ function handleAudioWsMessage(event) {
     switch (msg.type) {
       case 'session_ready':
         console.log('[Audio Pipeline] Session ready:', msg.session_id);
-        renderChatMessage('agent', 'Hi! Thanks for calling Vera Support. How can I help you today?');
         break;
       case 'transcript':
         renderChatMessage('user', msg.text);
@@ -381,8 +403,8 @@ function handleAudioWsMessage(event) {
         setAgentState('speaking', 'Speaking');
         break;
       case 'bot_turn_end':
-        renderChatMessage('agent', msg.reply || '(no response)');
-        if (msg.reply) isBotSpeaking = true;
+        if (msg.reply) renderAgentMessageTyping(msg.reply);
+        incrementTurnCounter();
         break;
       case 'stt_empty':
         setAgentState('listening', 'Listening');
@@ -390,6 +412,7 @@ function handleAudioWsMessage(event) {
       case 'interrupt_ack':
         stopPlayback();
         setAgentState('interrupted', 'Interrupted');
+        showToast('Barge-in — Vera stopped listening mid-response', 'info', 2500);
         break;
       case 'error':
         console.error('[Audio Pipeline]', msg.message);
@@ -474,6 +497,8 @@ function endVoiceCall() {
   }
   wsAudio = null;
   stopPlayback();
+  stopSessionTimer();
+  showToast('Call ended', 'info', 2500);
 
   if (captureProcessor) {
     captureProcessor.disconnect();
@@ -556,47 +581,7 @@ function drawIdleVisualizer() {
 }
 
 function startAudioVisualizer() {
-  const bufferLength = audioAnalyser ? audioAnalyser.frequencyBinCount : 32;
-  const dataArray = new Uint8Array(bufferLength);
-
-  function render() {
-    if (!isCallActive) return;
-    animationFrameId = requestAnimationFrame(render);
-
-    if (audioAnalyser) {
-      audioAnalyser.getByteFrequencyData(dataArray);
-    }
-
-    const width = canvas.width;
-    const height = canvas.height;
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const radius = 65;
-
-    canvasCtx.clearRect(0, 0, width, height);
-
-    const bars = 36;
-    for (let i = 0; i < bars; i++) {
-      const rad = (i * 2 * Math.PI) / bars;
-      const value = dataArray[i % bufferLength] || (15 + Math.sin(Date.now() * 0.005 + i) * 10);
-      const barHeight = (value / 255) * 35 + 4;
-
-      const x1 = centerX + Math.cos(rad) * radius;
-      const y1 = centerY + Math.sin(rad) * radius;
-      const x2 = centerX + Math.cos(rad) * (radius + barHeight);
-      const y2 = centerY + Math.sin(rad) * (radius + barHeight);
-
-      canvasCtx.beginPath();
-      canvasCtx.moveTo(x1, y1);
-      canvasCtx.lineTo(x2, y2);
-      canvasCtx.strokeStyle = `hsl(${(i * 10 + Date.now() * 0.05) % 360}, 85%, 65%)`;
-      canvasCtx.lineWidth = 3;
-      canvasCtx.lineCap = 'round';
-      canvasCtx.stroke();
-    }
-  }
-
-  render();
+  // Superseded by the always-on drawOrbVisualizer ring (audio-reactive in all states).
 }
 
 function startSpeakingWave() {
@@ -606,3 +591,207 @@ function startSpeakingWave() {
 function startListeningWave() {
   // Mic input visual
 }
+
+// ============================================================================
+// Cinematic Visual Modules (v2 UI) - part 1
+// ============================================================================
+
+// ---- 1. Particle Starfield Background ----
+const starCanvas = document.getElementById('bgStars');
+const starCtx = starCanvas ? starCanvas.getContext('2d') : null;
+let stars = [];
+
+function initStarfield() {
+  if (!starCtx) return;
+  starCanvas.width = window.innerWidth;
+  starCanvas.height = window.innerHeight;
+  stars = [];
+  const count = Math.floor((window.innerWidth * window.innerHeight) / 9000);
+  for (let i = 0; i < count; i++) {
+    stars.push({
+      x: Math.random() * starCanvas.width,
+      y: Math.random() * starCanvas.height,
+      r: Math.random() * 1.4 + 0.3,
+      speed: Math.random() * 0.15 + 0.03,
+      tw: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+function drawStarfield() {
+  if (!starCtx) return;
+  starCtx.clearRect(0, 0, starCanvas.width, starCanvas.height);
+  for (const s of stars) {
+    s.y -= s.speed;
+    if (s.y < -2) { s.y = starCanvas.height + 2; s.x = Math.random() * starCanvas.width; }
+    s.tw += 0.03;
+    const alpha = 0.25 + Math.abs(Math.sin(s.tw)) * 0.55;
+    starCtx.beginPath();
+    starCtx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    starCtx.fillStyle = `rgba(199, 210, 254, ${alpha})`;
+    starCtx.fill();
+  }
+  requestAnimationFrame(drawStarfield);
+}
+
+// ---- 2. Session Timer ----
+let sessionStartTime = null;
+let sessionTimerInterval = null;
+
+function startSessionTimer() {
+  sessionStartTime = Date.now();
+  if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+  sessionTimerInterval = setInterval(() => {
+    const el = document.getElementById('sessionTimer');
+    if (!el) return;
+    const s = Math.floor((Date.now() - sessionStartTime) / 1000);
+    el.innerText = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }, 1000);
+}
+
+function stopSessionTimer() {
+  if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+  sessionTimerInterval = null;
+  const el = document.getElementById('sessionTimer');
+  if (el) el.innerText = '00:00';
+}
+
+// ---- 3. Toast Notifications ----
+function showToast(message, type = 'info', durationMs = 3500) {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  const icons = { success: '✅', error: '❌', info: '💡' };
+  toast.innerHTML = `<span>${icons[type] || '💡'}</span><span>${message}</span>`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('leaving');
+    setTimeout(() => toast.remove(), 320);
+  }, durationMs);
+}
+
+// ---- 4. Audio-Reactive Orb Ring Visualizer (canvas behind the orb) ----
+let orbLevel = 0;
+let micLevelSmoothed = 0;
+let orbAnimStarted = false;
+let lastLoudTime = null;
+let silenceWarned = false;
+
+function drawOrbVisualizer() {
+  if (!canvasCtx) return;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  canvasCtx.clearRect(0, 0, w, h);
+
+  const centerX = w / 2, centerY = h / 2;
+  const baseRadius = 78;
+
+  let level;
+  if (audioAnalyser && isCallActive) {
+    const bufferLength = audioAnalyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    audioAnalyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
+    level = Math.min(1, (sum / bufferLength) / 90);
+  } else {
+    level = 0.12 + Math.sin(Date.now() * 0.0018) * 0.06;
+  }
+  orbLevel += (level - orbLevel) * 0.15;
+  updateMicMeter(level);
+
+  // Silence watchdog: warn once if the mic delivers ~silence for 5s during a call
+  if (isCallActive) {
+    const now = Date.now();
+    if (level >= 0.02) {
+      lastLoudTime = now;
+      silenceWarned = false;
+    } else if (!silenceWarned && lastLoudTime && now - lastLoudTime > 5000) {
+      silenceWarned = true;
+      showToast('Your microphone appears silent. Check the mic device/mute in Windows sound settings.', 'error', 6000);
+    }
+  }
+
+  const bars = 48;
+  const time = Date.now() * 0.002;
+  for (let i = 0; i < bars; i++) {
+    const angle = (i * 2 * Math.PI) / bars + time * 0.25;
+    const wobble = Math.sin(time * 3 + i * 0.7) * 4;
+    const radius = baseRadius + wobble + orbLevel * 42;
+    const len = 6 + orbLevel * 30 + Math.abs(Math.sin(time * 2 + i)) * 10;
+
+    const x1 = centerX + Math.cos(angle) * radius;
+    const y1 = centerY + Math.sin(angle) * radius;
+    const x2 = centerX + Math.cos(angle) * (radius + len);
+    const y2 = centerY + Math.sin(angle) * (radius + len);
+
+    const hue = 210 + Math.sin(time + i * 0.3) * 60;
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(x1, y1);
+    canvasCtx.lineTo(x2, y2);
+    canvasCtx.strokeStyle = `hsla(${hue}, 90%, 68%, ${0.35 + orbLevel * 0.5})`;
+    canvasCtx.lineWidth = 2.4;
+    canvasCtx.lineCap = 'round';
+    canvasCtx.stroke();
+  }
+
+  const halo = canvasCtx.createRadialGradient(centerX, centerY, baseRadius * 0.6, centerX, centerY, baseRadius + 90);
+  halo.addColorStop(0, `rgba(129, 140, 248, ${0.10 + orbLevel * 0.25})`);
+  halo.addColorStop(1, 'rgba(129, 140, 248, 0)');
+  canvasCtx.fillStyle = halo;
+  canvasCtx.fillRect(0, 0, w, h);
+
+  requestAnimationFrame(drawOrbVisualizer);
+}
+
+function updateMicMeter(level) {
+  micLevelSmoothed += (level - micLevelSmoothed) * 0.2;
+  const pct = Math.min(100, Math.round(micLevelSmoothed * 140));
+  const fill = document.getElementById('micLevelFill');
+  const val = document.getElementById('micLevelValue');
+  if (fill) fill.style.width = pct + '%';
+  if (val) val.innerText = pct + '%';
+}
+
+// ---- 5. Typing Effect for Agent Messages ----
+function renderAgentMessageTyping(text) {
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'chat-msg agent';
+  msgDiv.innerHTML = `
+    <div class="sender-tag">Vera</div>
+    <div class="chat-bubble"><span class="typing-text"></span><span class="typing-cursor"></span></div>`;
+  transcriptFeed.appendChild(msgDiv);
+  transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+
+  const target = msgDiv.querySelector('.typing-text');
+  const cursor = msgDiv.querySelector('.typing-cursor');
+  let i = 0;
+  const speed = Math.max(8, Math.min(28, 1200 / Math.max(text.length, 1)));
+  const timer = setInterval(() => {
+    target.textContent = text.slice(0, ++i);
+    transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+    if (i >= text.length) {
+      clearInterval(timer);
+      if (cursor) cursor.remove();
+    }
+  }, speed);
+}
+
+// ---- 6. Turn Counter ----
+let turnCount = 0;
+function incrementTurnCounter() {
+  turnCount++;
+  const el = document.getElementById('valTurns');
+  if (el) el.innerText = turnCount;
+}
+
+// ---- 7. Boot the cinematic modules ----
+window.addEventListener('load', () => {
+  initStarfield();
+  drawStarfield();
+  drawOrbVisualizer();
+});
+window.addEventListener('resize', initStarfield);
+
+

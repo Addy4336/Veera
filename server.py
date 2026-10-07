@@ -50,10 +50,13 @@ app = FastAPI(
 )
 
 # Enable CORS for browser access
+# NOTE: allow_credentials must be False when using the "*" wildcard origin,
+# otherwise Starlette's CORSMiddleware rejects browser WebSocket handshakes
+# with 400 Bad Request (browsers send an Origin header on WS upgrades).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -233,6 +236,23 @@ async def chat_turn(req: ChatTurnRequest):
 # ============================================================================
 
 
+class WebSocketLoggingMiddleware:
+    """Logs every incoming WebSocket connection before any routing/middleware
+    runs. If a browser WS attempt does NOT produce this log line, the request
+    never reached this server (proxy/extension/firewall interference)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            logger.info(f"[WS-IN] Incoming WebSocket request for path: {scope.get('path')} from {scope.get('client')}")
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(WebSocketLoggingMiddleware)
+
+
 @app.websocket("/ws/metrics")
 async def ws_metrics_stream(websocket: WebSocket):
     """
@@ -284,7 +304,9 @@ async def ws_audio_channel(websocket: WebSocket):
       - Binary frames: synthesized PCM audio (16-bit 16kHz mono)
       - Text frames: JSON events (bot_token, bot_turn_end, transcript, error)
     """
+    logger.info("[WS-AUDIO] Handshake reached app; accepting upgrade...")
     await websocket.accept()
+    logger.info("[WS-AUDIO] Upgrade accepted (101 sent to client).")
     session = sessions.create_session(transport="websocket")
     logger.info(f"Audio channel connected (session={session.id}).")
 
@@ -348,6 +370,7 @@ async def ws_audio_channel(websocket: WebSocket):
                 # Raw mic audio -> utterance segmentation
                 utterance = session.segmenter.process(message["bytes"])
                 if utterance:
+                    logger.info(f"[VAD] Speech utterance detected ({len(utterance)} bytes, {len(utterance)/32000:.2f}s) - transcribing...")
                     session.start_turn(lambda: run_utterance_turn(utterance))
                 continue
 
@@ -466,6 +489,24 @@ if __name__ == "__main__":
     except UnicodeEncodeError:
         # stdout redirected / non-UTF-8 console: strip non-ascii characters
         print(banner.encode("ascii", "ignore").decode())
+
+    # Guard against zombie servers: on Windows, SO_REUSEADDR lets multiple
+    # processes silently bind the same port, and browsers then hit a wedged
+    # old worker (HTTP works, WebSocket handshakes hang/reject).
+    import socket as _socket
+
+    probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        probe.bind(("0.0.0.0", config.PORT))
+        probe.close()
+    except OSError:
+        print(
+            f"!! ERROR: Port {config.PORT} is ALREADY IN USE by another process.\n"
+            f"!! Another (possibly stale) Vera server instance is running.\n"
+            f"!! Fix: close the old terminal, or run:  taskkill /F /IM python.exe\n"
+            f"!! then start this server again."
+        )
+        raise SystemExit(1)
 
     uvicorn.run(
         "server:app",
